@@ -24,6 +24,7 @@ import math
 train_path = './dataset_cifar10/train'
 val_path = './dataset_cifar10/test'
 
+#data loader
 class MyDataset(Dataset):
     def __init__(self, data_path:str, transform=None):
         self.data_path = data_path
@@ -33,12 +34,7 @@ class MyDataset(Dataset):
             [
                 transforms.RandomCrop(32, padding=4, padding_mode='reflect'),
                 transforms.RandomHorizontalFlip(),
-                # transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5)),
-                # transforms.ColorJitter(brightness=.2, hue=.1),
-                # transforms.RandomVerticalFlip(),
-                # transforms.RandomRotation((0,10)),
-                # transforms.Resize(size = (32,32)),#尺寸规范
-                transforms.ToTensor(),   #转化为tensor
+                transforms.ToTensor(),   
                 transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
             ])
         else:
@@ -86,8 +82,8 @@ class MyDatasetval(Dataset):
         if transform is None:
             self.transform = transforms.Compose(
             [
-                transforms.Resize(size = (32,32)),#尺寸规范                
-                transforms.ToTensor(),   #转化为tensor
+                transforms.Resize(size = (32,32)),#image size            
+                transforms.ToTensor(),   #
                 transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
             ])
         else:
@@ -128,7 +124,7 @@ class MyDatasetval(Dataset):
         return img, label
     def __len__(self) -> int:
         return len(self.path_list)
-
+#training
 def train_seperate(e, train_loader, device,agent1, agent2, optimizer1, optimizer2, sched1, sched2, writer):
     agent1.train()
     agent2.train()
@@ -143,17 +139,17 @@ def train_seperate(e, train_loader, device,agent1, agent2, optimizer1, optimizer
     
         optimizer1.zero_grad()
         optimizer2.zero_grad()
-    
+
+        #get the prediction results and bids 
         pred1, bid1 = agent1(images)
         pred2, bid2 = agent2(images)
 
-
+        #calculate the cross-entropy loss
         pred1 = F.softmax(pred1, dim=1)
-        log_p1 = (torch.log(pred1+math.exp(-70)))
+        log_p1 = (torch.log(pred1+math.exp(-70))) #add a small number to avoid nan
+        #one_hot means it is one if it corresponding to the right label, else zero
         one_hot = torch.zeros(pred1.shape,dtype=torch.double,device=device).scatter_(1, torch.unsqueeze(labels, dim=1),1)
-
-
-        # loss1 = -torch.sum(one_hot*log_p1,dim=1).unsqueeze(1) * probs1[:,1] + c1 + F.smooth_l1_loss(bid1, bid2.detach())*flag
+        #sigma is the standard deviation for bids
         sigma = 0.1*torch.ones_like(bid1).to(device)*torch.sqrt(torch.tensor([2])).to(device)
         ones_t = torch.ones_like(bid1).to(device)
         bid_diff = bid1-bid2.detach()
@@ -162,17 +158,16 @@ def train_seperate(e, train_loader, device,agent1, agent2, optimizer1, optimizer
         dis1_2_sp = Normal(bid_diff-0.01*ones_t, sigma)
         p_a1_loss = dis1_1.cdf(torch.zeros_like(bid1).to(device))
         a_1 = torch.sum(one_hot*log_p1,dim=1).unsqueeze(1).double()
-        # loss1 = -torch.sum(one_hot*log_p1,dim=1).unsqueeze(1) * p_a1_loss + torch.exp(bid1+0.5)*(1-dis1_2.cdf(torch.zeros_like(bid1)).to(device))
-        # fp_loss_1 = torch.exp(bid1+0.005)*(1-dis1_2_fp.cdf(torch.zeros_like(bid1)).to(device))
-        # sp_loss_1 = torch.exp(bid2.detach()+0.005)*(1-dis1_2_sp.cdf(torch.zeros_like(bid1)).to(device)) 
+
         fp_loss_1 = torch.exp(bid2.detach()+0.005)*(1-p_a1_loss)
         sp_loss_1 = torch.exp(bid1.to(device)+0.005)*(1-p_a1_loss)
+        #this is just a small experiment to have more balanced result
+        #generally, we use loss1 = -a_1 * p_a1_loss + sp_loss_1*0.9 + fp_loss_1*0.1, no first if
         if e < 50:
             loss1 = -a_1 + F.smooth_l1_loss(torch.mean(bid1), torch.mean(bid2.detach()))
         else:
             loss1 = -a_1 * p_a1_loss + sp_loss_1*0.9 + fp_loss_1*0.1 #+ F.smooth_l1_loss(torch.mean(bid1), torch.mean(bid2.detach()))
-            # a_1_pre = torch.sum(one_hot*pred1,dim=1).unsqueeze(1)
-            # loss1 = -(a_1_pre.detach() + a_1 - torch.exp(bid2.detach()+0.005))*(1-p_a1_loss)
+
         loss1 = loss1.sum()
         loss1/=pred1.shape[0]
 
@@ -180,28 +175,20 @@ def train_seperate(e, train_loader, device,agent1, agent2, optimizer1, optimizer
         pred2 = F.softmax(pred2, dim=1) 
         
         log_p2 = (torch.log(pred2+math.exp(-70)))
-        # loss2 = -torch.sum(one_hot*log_p2,dim=1).unsqueeze(1) * probs2[:,0] + c2 + F.smooth_l1_loss(bid1.detach(), bid2)*flag
     
         bid_diff2 = bid2-bid1.detach()
         dis2_1 = Normal(bid_diff2, sigma)
         dis2_2_fp = Normal(bid_diff2+0.01*ones_t, sigma) #fp means first price
         dis2_2_sp = Normal(bid_diff2-0.01*ones_t, sigma)
         p_a2_loss = dis2_1.cdf(torch.zeros_like(bid2).to(device))
-        # dis2_balanced = Normal(bid_diff2-torch.mean(bid_diff2).detach(), sigma)
-        # p_a2_balanced = dis2_balanced.cdf(torch.zeros_like(bid1).to(device))
         a_2 = torch.sum(one_hot*log_p2,dim=1).unsqueeze(1).double()
-        # loss2 = -torch.sum(one_hot*log_p2,dim=1).unsqueeze(1) * p_a2_loss + torch.exp(bid2+0.5)*(1-dis2_2.cdf(torch.zeros_like(bid2)).to(device))
-        # fp_loss_2 = torch.exp(bid2+0.005)*(1-dis2_2_fp.cdf(torch.zeros_like(bid2)).to(device))
-        # sp_loss_2 = torch.exp(bid1.detach()+0.005)*(1-dis2_2_sp.cdf(torch.zeros_like(bid2)).to(device)) 
         fp_loss_2 = torch.exp(bid2+0.005)*(1-p_a2_loss)
         sp_loss_2 = torch.exp(bid1.detach().to(device)+0.005)*(1-p_a2_loss) 
         
         if e<50:
             loss2 = -a_2 + F.smooth_l1_loss(torch.mean(bid1.detach()), torch.mean(bid2))
         else:
-            loss2 = -a_2 * p_a2_loss + sp_loss_2*0.9 + fp_loss_2*0.1 #+ F.smooth_l1_loss(torch.mean(bid1.detach()), torch.mean(bid2))#+ 0.3*F.smooth_l1_loss(bid2, bid1.detach())
-            # a_2_pre = torch.sum(one_hot*pred2,dim=1).unsqueeze(1)
-            # loss2 = -(a_2_pre.detach() + a_2 - torch.exp(bid1.detach()+0.005))*(1-p_a2_loss)
+            loss2 = -a_2 * p_a2_loss + sp_loss_2*0.9 + fp_loss_2*0.1 
         
         loss2 = loss2.sum()
         loss2/=pred2.shape[0] 
@@ -211,7 +198,7 @@ def train_seperate(e, train_loader, device,agent1, agent2, optimizer1, optimizer
         loss2.backward()
         optimizer2.step()
 
-        sched1.step()
+        sched1.step() #learning rate scheduler, you could tune as you wish
         sched2.step()
         
     
@@ -228,9 +215,6 @@ def train_seperate(e, train_loader, device,agent1, agent2, optimizer1, optimizer
     accuracy = correct_pred.cpu()/float(total_num)
     writer.add_scalar('loss/train', total_loss, e)
     writer.add_scalar('accuracy/train', accuracy, e)
-    # log = np.vstack(log)
-    # save_path = f'./log/{e}_{SEED}cnn_log.txt'
-    # np.savetxt(save_path, log, fmt='%1.4e')
     return total_loss/i, accuracy
 
 def eval_seperate(e, eval_loader, device, agent1, agent2, writer):
@@ -239,7 +223,6 @@ def eval_seperate(e, eval_loader, device, agent1, agent2, writer):
     correct_pred = 0
     total_num = 0
     total_loss = 0.0
-    beta = 1000
     i = 0
     for images, labels in eval_loader:
         i += 1
@@ -256,7 +239,6 @@ def eval_seperate(e, eval_loader, device, agent1, agent2, writer):
         one_hot = torch.zeros(pred1.shape,dtype=torch.double,device=device).scatter_(1, torch.unsqueeze(labels, dim=1),1)
 
 
-        # loss1 = -torch.sum(one_hot*log_p1,dim=1).unsqueeze(1) * probs1[:,1] + c1 + F.smooth_l1_loss(bid1, bid2.detach())*flag
         sigma = 0.1*torch.ones_like(bid1).to(device)*torch.sqrt(torch.tensor([2])).to(device)
         ones_t = torch.ones_like(bid1).to(device)
         bid_diff = bid1-bid2.detach().to(device)
@@ -265,12 +247,10 @@ def eval_seperate(e, eval_loader, device, agent1, agent2, writer):
         dis1_2_sp = Normal(bid_diff-0.01*ones_t, sigma)
         p_a1_loss = dis1_1.cdf(torch.zeros_like(bid1).to(device))
         a_1 = torch.sum(one_hot*log_p1,dim=1).unsqueeze(1)
-        # loss1 = -torch.sum(one_hot*log_p1,dim=1).unsqueeze(1) * p_a1_loss + torch.exp(bid1+0.5)*(1-dis1_2.cdf(torch.zeros_like(bid1)).to(device))
-        # fp_loss_1 = torch.exp(bid1+0.005)*(1-dis1_2_fp.cdf(torch.zeros_like(bid1)).to(device))
-        # sp_loss_1 = torch.exp(bid2.detach()+0.005)*(1-dis1_2_sp.cdf(torch.zeros_like(bid1)).to(device)) 
+    
         fp_loss_1 = torch.exp(bid2.detach()+0.005)*(1-p_a1_loss)
         sp_loss_1 = torch.exp(bid1.to(device)+0.005)*(1-p_a1_loss)
-        loss1 = -a_1 * p_a1_loss + sp_loss_1*0.9+ fp_loss_1*0.1 #0.3*F.smooth_l1_loss(extra_bid1, torch.zeros_like(extra_bid1).to(device))
+        loss1 = -a_1 * p_a1_loss + sp_loss_1*0.9+ fp_loss_1*0.1 
         
         loss1 = loss1.sum()
         loss1/=pred1.shape[0]
@@ -278,16 +258,12 @@ def eval_seperate(e, eval_loader, device, agent1, agent2, writer):
         # loss2 = F.cross_entropy(pred2, labels)
         pred2 = F.softmax(pred2, dim=1) 
         log_p2 = (torch.log(pred2+math.exp(-70)))
-        # loss2 = -torch.sum(one_hot*log_p2,dim=1).unsqueeze(1) * probs2[:,0] + c2 + F.smooth_l1_loss(bid1.detach(), bid2)*flag
         bid_diff = bid2-bid1.detach().to(device)
         dis2_1 = Normal(bid_diff, sigma)
         dis2_2_fp = Normal(bid_diff+0.01*ones_t, sigma) #fp means first price
         dis2_2_sp = Normal(bid_diff-0.01*ones_t, sigma)
         p_a2_loss = dis2_1.cdf(torch.zeros_like(bid2).to(device))
         a_2 = torch.sum(one_hot*log_p2,dim=1).unsqueeze(1)
-        # loss2 = -torch.sum(one_hot*log_p2,dim=1).unsqueeze(1) * p_a2_loss + torch.exp(bid2+0.5)*(1-dis2_2.cdf(torch.zeros_like(bid2)).to(device))
-        # fp_loss_2 = torch.exp(bid2+0.005)*(1-dis2_2_fp.cdf(torch.zeros_like(bid2)).to(device))
-        # sp_loss_2 = torch.exp(bid1.detach().to(device)+0.005)*(1-dis2_2_sp.cdf(torch.zeros_like(bid2)).to(device)) 
         fp_loss_2 = torch.exp(bid2+0.005)*(1-p_a2_loss)
         sp_loss_2 = torch.exp(bid1.detach().to(device)+0.005)*(1-p_a2_loss)
         loss2 = -a_2 * p_a2_loss + sp_loss_2*0.9 + fp_loss_2*0.1
@@ -300,7 +276,7 @@ def eval_seperate(e, eval_loader, device, agent1, agent2, writer):
             pred = pred1.detach() * 0.5 + pred2.detach() * 0.5
         else:
             pred = pred1.detach() * p_a1_loss.detach() + pred2.detach()*p_a2_loss.detach()
-        # pred = pred1#*0.5 + pred2*0.5
+        
         pred = torch.argmax(pred, dim=1)
         correct = torch.sum(pred.eq(labels))
         correct_pred += correct
@@ -338,6 +314,9 @@ def main(epochs, seed):
     agent2 = agent2.to(device)
 
     max_lr = 1e-3
+    #this resnet9 implementation may have some problems, if you use adam as the optimizer, then
+    #the validation performance might suddenly drop to 0.1 at sometime.
+    #if you want to use adam, please use ResNet18 or other models.
     optimizer1 = torch.optim.SGD(agent1.parameters(),lr=1e-4, weight_decay=1e-3)
     optimizer2 = torch.optim.SGD(agent2.parameters(),lr=1e-4, weight_decay=1e-3)
     sched1 = torch.optim.lr_scheduler.OneCycleLR(optimizer1, max_lr, epochs=epochs, 
@@ -412,34 +391,28 @@ def test(enum,noise):
     pred2 = F.softmax(pred2)
     print(pred1[0,1].detach().cpu(), pred2[0,1].detach().cpu(), torch.exp(bid1[0,0]).detach().cpu(), torch.exp(bid2[0,0]).detach().cpu())
     return pred1[0,1].detach().cpu(), pred2[0,1].detach().cpu(), torch.exp(bid1[0,0]).detach().cpu(), torch.exp(bid2[0,0]).detach().cpu()
- 
+#test2 is used to test the checkpoints and get the output for each datapoint 
 def test2(e_num):
     np.random.seed(SEED)
     torch.manual_seed(SEED)
     torch.random.manual_seed(SEED)
     device = torch.device('cuda')
+    #this path points to the dataset you want to test
+    #you could use val_path for validation set and train_path for training set
     train_ds = MyDatasetval(val_path)
-    # pth1=f'model/50cnnmodel1t{SEED}nl.pt'
-    # pth2=f'model/50cnnmodel2t{SEED}nl.pt'
     pth1 = f'model/cnnmodel1t{SEED}_sto_know_{e_num}.pt'
     pth2 = f'model/cnnmodel2t{SEED}_sto_know_{e_num}.pt'
     pth1 = f'model/cnnmodel1t{SEED}_sto_resnet_fixed_best.pt'
     pth2 = f'model/cnnmodel2t{SEED}_sto_resnet_fixed_best.pt'
-    # pth1='model/model1.pt'
-    # pth2='model/model2.pt'
     test_agent1=torch.load(pth1)
     test_agent2=torch.load(pth2)
-
-    # full_ds = train_ds
-    # train_size = int(0.8 * len(full_ds))
-    # validate_size = len(full_ds) - train_size
-    # new_train_ds, validate_ds = torch.utils.data.random_split(full_ds,[train_size, validate_size])
 
     validate_loader = torch.utils.data.DataLoader(train_ds, batch_size=128,
                                                 shuffle=False, pin_memory=True, num_workers=8)
     save_pth = f'50cnn_log{SEED}_sto_resnet_best.txt'
     test_write(save_pth, validate_loader,device,test_agent1,test_agent2)
 
+# write the model output into a txt file, the output will be ordered by its class
 def test_write(save_pth, eval_loader, device, agent1, agent2):
     agent1.eval()
     agent2.eval()
@@ -466,10 +439,7 @@ def test_write(save_pth, eval_loader, device, agent1, agent2):
         
         v1 = torch.sum(one_hot*log_pred1,dim=1).unsqueeze(1)
         v2 = torch.sum(one_hot*log_pred2,dim=1).unsqueeze(1)
-        # v1,_ = torch.max(pred1,dim=1)
-        # v2,_ = torch.max(pred2,dim=1)
-        # v1 = v1.unsqueeze(-1)
-        # v2 = v2.unsqueeze(-1)
+        
         sigma = torch.ones_like(bid1).to(device)*torch.sqrt(torch.tensor([2])).to(device)
         
         dis1_1 = Normal(bid1-bid2.detach(), sigma)
@@ -490,6 +460,7 @@ def test_write(save_pth, eval_loader, device, agent1, agent2):
     log = np.vstack(log)
     np.savetxt(save_pth,log, fmt='%1.4e')
 
+#this test function is for single agent baseline
 def test2_sg(e_num):
     np.random.seed(SEED)
     torch.manual_seed(SEED)
@@ -500,11 +471,6 @@ def test2_sg(e_num):
     pth1 = f'model/cnnmodel1t{SEED}_sto_resnet_bl_best.pt'
     
     test_agent1=torch.load(pth1)
-    
-    # full_ds = train_ds
-    # train_size = int(0.8 * len(full_ds))
-    # validate_size = len(full_ds) - train_size
-    # new_train_ds, validate_ds = torch.utils.data.random_split(full_ds,[train_size, validate_size])
 
     validate_loader = torch.utils.data.DataLoader(train_ds, batch_size=512,
                                                 shuffle=False, pin_memory=True, num_workers=8)
@@ -549,9 +515,8 @@ def test_write_sg(save_pth, eval_loader, device, agent1):
     np.savetxt(save_pth,log, fmt='%1.4e')
     
 if __name__ == "__main__":
-    seed = 49#27 #0.7918 1710 with added loss, 0.78600, 1692 without added loss, 0.7916, half, 0.7858, single agent no bid
-    # for seed in [13,25,51,101]:
-    #     main(500, seed)
+    seed = 49#27 
+    #500 is the number of epochs
     main(500, seed) # normal 1500,0.7768; 0.7858
     # seeds = [0,18,25,26,28,42,53,102,114,115,132,172]
     global SEED
